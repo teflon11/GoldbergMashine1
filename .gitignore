@@ -1,0 +1,13 @@
+# зависимости (для тестов; сам index.html их не требует)
+node_modules/
+
+# скриншоты прогона в браузере — пересоздаются командой npm run test:browser
+shots/
+
+# служебное
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.env
+.env.*

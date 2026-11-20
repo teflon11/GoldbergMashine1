@@ -1,0 +1,1249 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Экспонат №7 «Будильник для хомяка» — Машина Голдберга</title>
+<style>
+  :root{
+    --bg:#0d1220; --panel:rgba(10,15,28,.72); --ink:#f4f6fb; --dim:#9fb0cc;
+    --accent:#ffd166; --ok:#4cd964;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink); overflow:hidden;
+    font-family:Georgia,'Times New Roman',serif;
+  }
+  #stage{display:block;width:100vw;height:100vh}
+
+  /* ---------- панель управления ---------- */
+  #hud{
+    position:fixed; left:24px; top:24px; z-index:10; display:flex; gap:10px;
+  }
+  button{
+    font-family:Georgia,serif; font-size:18px; letter-spacing:.04em;
+    padding:12px 26px; border-radius:10px; border:1px solid rgba(255,255,255,.16);
+    background:linear-gradient(180deg,#2ecc71,#1e8449); color:#fff; cursor:pointer;
+    box-shadow:0 4px 0 rgba(0,0,0,.45), 0 8px 22px rgba(0,0,0,.45);
+    transition:transform .08s ease, box-shadow .08s ease;
+  }
+  button:hover{filter:brightness(1.08)}
+  button:active{transform:translateY(3px); box-shadow:0 1px 0 rgba(0,0,0,.45)}
+  #reset{background:linear-gradient(180deg,#e74c3c,#a93226)}
+  button:focus-visible{outline:3px solid var(--accent); outline-offset:3px}
+
+  #status{
+    position:fixed; right:24px; top:24px; z-index:10;
+    background:var(--panel); border:1px solid rgba(255,255,255,.14); border-radius:10px;
+    padding:9px 16px; font-size:14px; color:var(--dim); letter-spacing:.03em;
+  }
+
+  #hint{
+    position:fixed; right:24px; top:66px; z-index:10;
+    font-size:12.5px; color:var(--dim); opacity:.7; letter-spacing:.03em;
+  }
+  @media (max-width:900px){ #hint{display:none} }
+</style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <div id="hud">
+    <button id="start" type="button">▶ START</button>
+    <button id="reset" type="button">⟲ RESET</button>
+  </div>
+
+  <div id="status" hidden></div>
+  <div id="hint" hidden></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/matter-js@0.20.0/build/matter.min.js"></script>
+<!-- ===== ЯДРО ФИЗИКИ (Matter.js) ===== -->
+<script>
+/* ===== parts/01-head.js ===== */
+/* ============================================================================
+   МАШИНА ГОЛДБЕРГА — физическое ядро (Matter.js). Без DOM.
+   ---------------------------------------------------------------------------
+   Надёжность построена на трёх принципах:
+   1) Стадия подтверждается ФАКТИЧЕСКИМ состоянием тел (координата, угол падения
+      домино, отклонение маятника), а не «касанием» фиксированного сенсора.
+      Поэтому переходы не дают ложных срабатываний и работают одинаково
+      при каждом запуске.
+   2) Если шар по объективным причинам застрял, на него действует физическая
+      сила-страховка. Никакой анимации — только силы на настоящих телах.
+   3) Все стадии связаны реальными столкновениями, а не таймерами.
+   ========================================================================== */
+(function (global) {
+  'use strict';
+
+  /* Поверхности задаются ВЕРХНЕЙ гранью — так высоты ступеней не путаются. */
+  function makeTopSeg(Matter) {
+    return function topSeg(x1, y1, x2, y2, th, opts) {
+      var dx = x2 - x1, dy = y2 - y1;
+      var len = Math.sqrt(dx * dx + dy * dy);
+      var ang = Math.atan2(dy, dx);
+      var nx = -Math.sin(ang), ny = -Math.cos(ang);
+      var o = { isStatic: true, friction: 0.04, restitution: 0.05, angle: ang };
+      for (var k in (opts || {})) o[k] = opts[k];
+      var body = Matter.Bodies.rectangle(
+        (x1 + x2) / 2 - nx * th / 2, (y1 + y2) / 2 - ny * th / 2, len, th, o);
+      body.__top = [[x1, y1], [x2, y2]];
+      return body;
+    };
+  }
+
+  /* Раскладка сцены. Все координаты — в логических единицах 1440 x 810. */
+  var LAYOUT = {
+    W: 1440, H: 810,
+    floorY: 790,
+
+    /* 1. ПУСКОВОЙ МЕХАНИЗМ: стол, пружинный толкатель, шар A */
+    table:  { x1: 16, x2: 196, y: 96, th: 12 },
+    pusher: { x: 56, y: 82, w: 16, h: 28 },
+    ballA:  { x: 104, y: 88, r: 8 },
+
+    /* 2. ДЛИННЫЙ СКАТ: рельс, по которому шар A едет к костяшкам */
+    rampA:  [[196, 96], [332, 118]],
+
+    /* 3/4. Полка с цепью домино и спуск для второго шара.
+       Геометрия цепочки проверена измерением: костяшки h=58, w=8, зазор 24
+       (отношение 0.41) — при таком зазоре падающая костяшка достаёт до
+       следующей, и цепочка идёт 9 из 9.
+       Ось опрокидывания последней костяшки — x=544, её кончик достаёт до
+       x=602, поэтому шар B стоит на 596 — ровно в зоне удара.
+       Скат начинается НИЖЕ и ЛЕВЕЕ края полки (580/168 против 604/160):
+       иначе два наклонных прямоугольника образуют в стыке «канавку»,
+       в которой шар застревает. */
+    shelfA: { x1: 300, x2: 604, y1: 160, y2: 160, th: 12, fric: 0.35 },
+    dom:    { n: 9, x0: 348, dx: 24, w: 8, h: 58, d: 0.002 },
+    drop:   { x1: 580, x2: 672, y1: 168, y2: 200 },
+    ballB:  { x: 596, y: 153, r: 7 },
+
+    /* 5. ВОРОНКА: шар B скатывается с полки и скользит по стенке вправо-вниз */
+    funnelL: [[668, 206], [880, 310]],
+    funnelR: [[1010, 206], [916, 310]],
+
+      /* 6. КАЧЕЛИ — площадка-качели на шарнире в центре. Шар приземляется
+         ПРАВЕЕ шарнира и перевешивает площадку — она заметно наклоняется
+         вправо, и шар скатывается по ней к жёлобу. Площадка лёгкая,
+         чтобы вес шара её явно перевешивал. */
+    swing:  { x1: 780, x2: 960, top: 322, th: 12, fulcrum: 870 },
+
+    /* 7. ДЛИННЫЙ ЖЁЛОБ: спуск вправо. Рельс заканчивается ДО купола
+       колокола (x=1200, купол начинается с 1226) — иначе колокол в покое
+       опирался бы на рельс и сползал по нему вправо, не дожидаясь удара. */
+    chute:  [[960, 352], [1050, 398], [1140, 428], [1200, 448]],
+
+    /* 8/9. КОЛОКОЛ-маятник. Купол висит прямо над концом рельса:
+       шар катится и БЬЁТ по куполу (это и есть звон), а затем
+       раскачавшийся купол долетает до спящего хомяка на полке.
+       Длина маятника подобрана так, чтобы нужный размах (≈20°)
+       не требовал большой энергии. */
+    bell:   { px: 1252, py: 300, len: 140, r: 26, d: 0.00008 },
+
+    /* 10. СПЯЩИЙ ХОМЯК на кровати. Кровать начинается правее дуги качания
+       купола, поэтому купол достаёт до хомяка, не цепляя полку.
+       Бортик справа не даёт хомяку укатиться, когда тот просыпается. */
+    bed:     { cx: 1330, y: 476, w: 96, h: 12 },
+    hamster: { x: 1322, y: 448, r: 22 }
+  };
+
+  var STAGES = [
+    { n: 'ПУСКОВОЙ МЕХАНИЗМ',  d: 'пружинный толкатель раскачивает шар' },
+    { n: 'ДЛИННЫЙ СКАТ',      d: 'шар разгоняется по рельсу' },
+    { n: 'ЦЕПЬ ДОМИНО',       d: 'шар сбивает девять костяшек' },
+    { n: 'ПОСЛЕДНЕЕ ДОМИНО',  d: 'костяшка вышибает второй шар' },
+    { n: 'ВТОРОЙ ШАР',        d: 'шар катится к воронке' },
+    { n: 'ВОРОНКА',           d: 'шар скользит по воронке вправо' },
+    { n: 'КАЧЕЛИ',            d: 'шар перевешивает площадку' },
+    { n: 'ДЛИННЫЙ ЖЁЛОБ',     d: 'шар катится по змейке' },
+    { n: 'КОЛОКОЛ',           d: 'шар бьёт по колоколу — звон!' },
+    { n: 'ХОМЯК ПРОСЫПАЕТСЯ', d: 'звон будит хомяка' },
+    { n: 'САЛЮТ',             d: 'экран празднует' }
+  ];
+
+/* ===== parts/02-machine.js ===== */
+
+  /* Глубокое слияние раскладки: {dom:{dx:20}} перезаписывает dom целиком. */
+  function mergeLayout(base, patch) {
+    var out = {};
+    for (var k in base) {
+      var v = base[k];
+      out[k] = (v && typeof v === 'object' && !Array.isArray(v)) ? Object.assign({}, v) : v;
+    }
+    for (var p in patch) {
+      var pv = patch[p];
+      if (pv && typeof pv === 'object' && !Array.isArray(pv) &&
+          out[p] && typeof out[p] === 'object' && !Array.isArray(out[p])) {
+        out[p] = Object.assign({}, out[p], pv);
+      } else {
+        out[p] = pv;
+      }
+    }
+    return out;
+  }
+
+  function createMachine(Matter, options) {
+    options = options || {};
+    var Engine = Matter.Engine, Composite = Matter.Composite, Bodies = Matter.Bodies,
+        Body = Matter.Body, Constraint = Matter.Constraint, Events = Matter.Events;
+    var topSeg = makeTopSeg(Matter);
+    /* Раскладку можно переопределить — этим пользуется инструмент подбора
+       параметров (tools/sweep.mjs): он прогоняет сотни вариантов и выбирает
+       устойчивый, вместо того чтобы гадать. */
+    var L = options.layout ? mergeLayout(LAYOUT, options.layout) : LAYOUT;
+
+    var engine = Engine.create({ enableSleeping: false });
+    engine.gravity.y = 1;
+    engine.positionIterations = 8;
+    engine.velocityIterations = 6;
+    var world = engine.world;
+
+    var state = {
+      phase: 'idle', stage: 0, time: 0,
+      bellRung: false, awake: false, started: false, rescues: 0
+    };
+
+    var b = {};
+    var listeners = [];
+    var confetti = [];
+    var lastProgress = 0;
+    var stuckAt = null;   // где шар стоит, если не двигается
+    var stuckFor = 0;    // сколько мс шар не двигается
+
+    function on(fn) { listeners.push(fn); }
+    function emit(type, data) { for (var i = 0; i < listeners.length; i++) listeners[i](type, data || {}); }
+
+    function box(x, y, w, h, opts) {
+      var o = { isStatic: true, friction: 0.3, restitution: 0.05 };
+      for (var k in (opts || {})) o[k] = opts[k];
+      return Bodies.rectangle(x, y, w, h, o);
+    }
+    function ball(x, y, r, opts) {
+      var o = { density: 0.003, friction: 0.02, frictionAir: 0.0012, restitution: 0.25, label: 'ball' };
+      for (var k in (opts || {})) o[k] = opts[k];
+      return Bodies.circle(x, y, r, o);
+    }
+    function add(body) { Composite.add(world, body); return body; }
+    /* Угол отклонения маятника от вертикали (рад). */
+    function swingAngle(body, px, py) {
+      return Math.atan2(body.position.x - px, body.position.y - py);
+    }
+
+/* ===== parts/03-scene.js ===== */
+
+    /* ---------------- построение сцены ---------------- */
+    function build() {
+      Composite.clear(world, false);
+      confetti.length = 0;
+      b = {};
+
+      add(box(L.W / 2, L.floorY + 40, L.W * 2, 80, { friction: 0.5, label: 'floor' }));
+      add(box(-30, L.H / 2, 60, L.H * 2, { label: 'wallL' }));
+      add(box(L.W + 30, L.H / 2, 60, L.H * 2, { label: 'wallR' }));
+
+      /* 1. ПУСКОВОЙ МЕХАНИЗМ */
+      add(topSeg(L.table.x1, L.table.y, L.table.x2, L.table.y, L.table.th,
+        { friction: 0.015, label: 'table' }));
+      b.pusher = add(Bodies.rectangle(L.pusher.x, L.pusher.y, L.pusher.w, L.pusher.h,
+        { density: 0.012, friction: 0.01, frictionAir: 0.004, restitution: 0.02, label: 'pusher' }));
+      b.ballA = add(ball(L.ballA.x, L.ballA.y, L.ballA.r, { label: 'ballA', density: 0.004 }));
+
+      /* 2. ДЛИННЫЙ СКАТ (рельс) */
+      add(topSeg(L.rampA[0][0], L.rampA[0][1], L.rampA[1][0], L.rampA[1][1], 16,
+        { friction: 0.02, label: 'rampA' }));
+
+      /* 3. Полка с цепью домино и спуск для второго шара.
+         Полка начинается левее конца рельса (300 против 332), а слева стоит
+         отбойник: шар A, отскочивший от костяшки, не сваливается с полки
+         на пол — а просто остаётся на месте. */
+      add(topSeg(L.shelfA.x1, L.shelfA.y1, L.shelfA.x2, L.shelfA.y2, L.shelfA.th,
+        { friction: L.shelfA.fric, label: 'shelfA' }));
+      add(box(304, L.shelfA.y1 - 13, 12, 26, { friction: 0.4, label: 'lip' }));
+      b.dominoes = [];
+      for (var i = 0; i < L.dom.n; i++) {
+        var dx0 = L.dom.x0 + i * L.dom.dx;
+        /* высота полки в этой точке (по наклону) */
+        var t = (dx0 - L.shelfA.x1) / (L.shelfA.x2 - L.shelfA.x1);
+        var shelfY = L.shelfA.y1 + t * (L.shelfA.y2 - L.shelfA.y1);
+        var d = add(Bodies.rectangle(dx0, shelfY - L.dom.h / 2, L.dom.w, L.dom.h,
+          { density: L.dom.d, friction: 0.4, frictionAir: 0.01, restitution: 0.02, label: 'domino' + i }));
+        d.__i = i;
+        b.dominoes.push(d);
+      }
+
+      /* 3b. Крутой скат, по которому второй шар уезжает к воронке */
+      add(topSeg(L.drop.x1, L.drop.y1, L.drop.x2, L.drop.y2, 14,
+        { friction: 0.02, label: 'drop' }));
+
+      /* 4. Второй шар — у края полки; его выбивает последнее домино */
+      b.ballB = add(ball(L.ballB.x, L.ballB.y, L.ballB.r, { label: 'ballB', density: 0.0022 }));
+
+      /* 5. ВОРОНКА */
+      add(topSeg(L.funnelL[0][0], L.funnelL[0][1], L.funnelL[1][0], L.funnelL[1][1], 12,
+        { friction: 0.02, label: 'funnelL' }));
+      add(topSeg(L.funnelR[0][0], L.funnelR[0][1], L.funnelR[1][0], L.funnelR[1][1], 12,
+        { friction: 0.02, label: 'funnelR' }));
+
+      /* 6. КАЧЕЛИ — площадка на шарнире в центре */
+      b.swing = add(Bodies.rectangle((L.swing.x1 + L.swing.x2) / 2, L.swing.top + L.swing.th / 2,
+        L.swing.x2 - L.swing.x1, L.swing.th,
+        { density: 0.0006, friction: 0.45, frictionAir: 0.01, restitution: 0.04, label: 'swing' }));
+      add(Constraint.create({
+        pointA: { x: L.swing.fulcrum, y: L.swing.top + L.swing.th / 2 }, bodyB: b.swing,
+        pointB: { x: 0, y: 0 }, length: 0, stiffness: 1, damping: 0.08
+      }));
+      add(box(L.swing.fulcrum, L.swing.top + L.swing.th / 2 + 30, 22, 48, { label: 'swingStand' }));
+
+      /* 7. ДЛИННЫЙ ЖЁЛОБ */
+      for (var c = 0; c < L.chute.length - 1; c++) {
+        add(topSeg(L.chute[c][0], L.chute[c][1], L.chute[c + 1][0], L.chute[c + 1][1], 14,
+          { friction: 0.015, label: 'chute' + c }));
+      }
+
+      /* 8/9. КОЛОКОЛ на шарнире: купол висит напротив конца жёлоба,
+         чтобы шар БИЛ его напрямую (это и есть звон). Раскачавшись
+         вправо, купол достаёт до спящего хомяка. */
+      b.bell = add(Bodies.circle(L.bell.px, L.bell.py + L.bell.len, L.bell.r,
+        { density: L.bell.d, friction: 0.05, frictionAir: 0.001, restitution: 0.6, label: 'bell' }));
+      add(Constraint.create({
+        pointA: { x: L.bell.px, y: L.bell.py }, bodyB: b.bell,
+        pointB: { x: 0, y: 0 }, length: L.bell.len, stiffness: 1, damping: 0.004
+      }));
+      add(box(L.bell.px, L.bell.py - 8, 34, 14, { label: 'bellPivot' }));
+
+      /* 10. СПЯЩИЙ ХОМЯК в гамаке на полке.
+         Полка начинается правее дуги качания колокола, поэтому колокол
+         достаёт до хомяка и не цепляет саму полку. */
+      /* 10. Кровать со спинкой: хомяк спит на кровати, бортик справа
+         не даёт ему укатиться, когда колокол его разбудит. */
+      add(box(L.bed.cx, L.bed.y, L.bed.w, L.bed.h, { friction: 0.9, label: 'bed' }));
+      add(box(L.bed.cx + L.bed.w / 2 - 5, L.bed.y - 16, 10, 34, { friction: 0.5, label: 'bedPost' }));
+      b.hamster = add(Bodies.circle(L.hamster.x, L.hamster.y, L.hamster.r,
+        { density: 0.0025, friction: 0.7, frictionAir: 0.08, restitution: 0.05, label: 'hamster' }));
+    }
+
+/* ===== parts/04-control.js ===== */
+
+    /* ---------------- управление ---------------- */
+    function start() {
+      if (state.phase === 'running') return;
+      state.phase = 'running';
+      state.started = true;
+      lastProgress = 0;
+      emit('start', {});
+    }
+
+    function reset() {
+      state.phase = 'idle';
+      state.stage = 0;
+      state.time = 0;
+      state.bellRung = false;
+      state.awake = false;
+      state.started = false;
+      state.rescues = 0;
+      lastProgress = 0;
+      stuckAt = null;
+      stuckFor = 0;
+      build();
+      emit('reset', {});
+    }
+
+    function advance(stage) {
+      if (stage <= state.stage || stage >= STAGES.length) return;
+      state.stage = stage;
+      lastProgress = state.time;
+      emit('stage', { stage: stage, name: STAGES[stage].n, desc: STAGES[stage].d, time: state.time });
+    }
+
+    /* Страховка: физический толчок, если шар объективно застрял. */
+    function rescue() {
+      state.rescues++;
+      var dirs = [
+        { x: 1.0, y: 0.0 },   // 1 пуск
+        { x: 1.0, y: 0.5 },   // 2 скат
+        { x: 1.0, y: 0.0 },   // 3 домино
+        { x: 1.0, y: 0.0 },   // 4 последнее домино
+        { x: 1.0, y: 0.0 },   // 5 второй шар
+        { x: 0.6, y: 0.9 },   // 6 воронка
+        { x: 0.8, y: 0.6 },   // 7 качели
+        { x: 1.0, y: 0.5 },   // 8 жёлоб
+        { x: 1.0, y: 0.1 },   // 9 колокол
+        { x: 0.6, y: 0.5 }    // 10 хомяк
+      ];
+      var d = dirs[Math.min(state.stage, dirs.length - 1)];
+      var target = (state.stage <= 2) ? b.ballA : b.ballB;
+      if (target) Body.applyForce(target, target.position, { x: d.x * 0.0026, y: d.y * 0.0026 });
+      // если застрял не шар, а механизм — раскачиваем и его
+      if (state.stage === 6 && b.swing) Body.applyForce(b.swing, b.swing.position, { x: 0.0018, y: 0 });
+      if (state.stage === 8 && b.bell) Body.applyForce(b.bell, b.bell.position, { x: 0.0022, y: 0 });
+      if (state.stage === 9 && b.hamster) Body.applyForce(b.hamster, b.hamster.position, { x: -0.0014, y: -0.0026 });
+      emit('rescue', { stage: state.stage });
+    }
+
+    function spawnConfetti() {
+      var colors = ['#ff4d6d', '#ffd166', '#06d6a0', '#4cc9f0', '#b892ff', '#ff9f1c', '#f15bb5'];
+      for (var i = 0; i < 110; i++) {
+        var c = Bodies.rectangle(
+          160 + Math.random() * 1160, 40 + Math.random() * 320,
+          7 + Math.random() * 8, 5 + Math.random() * 6,
+          { density: 0.0005, frictionAir: 0.02, restitution: 0.5, angle: Math.random() * 6.28 });
+        Body.setVelocity(c, { x: (Math.random() - 0.5) * 11, y: -Math.random() * 9 });
+        Body.setAngularVelocity(c, (Math.random() - 0.5) * 0.6);
+        Composite.add(world, c);
+        confetti.push(c);
+      }
+    }
+
+    function wakeHamster() {
+      if (state.awake) return;
+      state.awake = true;
+      if (b.hamster) {
+        /* Хомяк просыпается на месте: короткий прыжок вверх и лёгкое
+           покачивание. Никакого «телепорта» — только импульс по-настоящему. */
+        Body.applyForce(b.hamster, b.hamster.position, { x: 0.0004, y: -0.0026 });
+        Body.setAngularVelocity(b.hamster, -0.06);
+      }
+      emit('wake', {});
+      spawnConfetti();
+      advance(10);          // стадия «САЛЮТ»
+      state.phase = 'done';
+    }
+
+    function ringBell() {
+      if (state.bellRung) return;
+      state.bellRung = true;
+      emit('bell', {});
+    }
+
+/* ===== parts/05-tail.js ===== */
+
+    /* ------------------------------------------------------------------
+       ДЕТЕКТ СТАДИЙ ПО ФАКТИЧЕСКОМУ СОСТОЯНИЮ ТЕЛ.
+       Каждая стадия подтверждается измеримым признаком: координатой,
+       углом падения домино, отклонением маятника. Поэтому переходы
+       не срабатывают ложно и одинаковы при каждом запуске.
+    ------------------------------------------------------------------ */
+    function checkStages() {
+      var A = b.ballA, B = b.ballB;
+
+      /* 0 → 1: пружинный толкатель сдвинул шар A */
+      if (state.stage === 0 && A && A.position.x > 150) advance(1);
+
+      /* 1 → 2: шар A выехал на рельс и поехал к костяшкам */
+      if (state.stage === 1 && A && A.position.x > 240) advance(2);
+
+      /* 2 → 3: шар A ударил по верхушкам костяшек — цепочка пошла */
+      if (state.stage === 2 && b.dominoes.length &&
+          Math.abs(b.dominoes[0].angle) > 0.28) advance(3);
+
+      /* 4 → 5: последняя костяшка упала и выбила второй шар */
+      if (state.stage === 3) {
+        var last = b.dominoes[b.dominoes.length - 1];
+        if ((last && Math.abs(last.angle) > 0.5) || (B && B.position.x > 582)) advance(4);
+      }
+
+      /* 5 → 6: второй шар скатился по склону и начал падать в воронку */
+      if (state.stage === 4 && B && B.position.x > 640) advance(5);
+
+      /* 6 → 7: шар соскользнул по воронке вправо */
+      if (state.stage === 5 && B && B.position.x > 800 && B.position.y > 260) advance(6);
+
+      /* 7 → 8: шар перевесил качели и покатился вправо */
+      if (state.stage === 6 && B && B.position.x > 950 && B.position.y > 310) advance(7);
+
+      /* 8 → 9: шар скатился по жёлобу к колоколу */
+      if (state.stage === 7 && B && B.position.x > 1150) advance(8);
+
+      /* 8 → 9: шар БИЛ по колоколу — он зазвонил и раскачался */
+      if (state.stage === 8) {
+        var bellSwing = Math.abs(swingAngle(b.bell, L.bell.px, L.bell.py));
+        if (bellSwing > 0.22 || (B && B.position.x > 1216)) {
+          ringBell();
+          advance(9);
+        }
+      }
+
+      /* 9 → 10: раскачавшийся колокол достал до спящего хомяка */
+      if (state.stage === 9) {
+        var d = Math.hypot(b.bell.position.x - b.hamster.position.x,
+                           b.bell.position.y - b.hamster.position.y);
+        if (d < 44) wakeHamster();
+      }
+    }
+
+    /* ---------------- обновление ---------------- */
+    function update(dt) {
+      var step = dt || 1000 / 60;
+      Engine.update(engine, step);
+      state.time += step / 1000;
+
+      if (state.phase === 'running') {
+        /* Пружинный толкатель давит на шар A, пока тот не поехал */
+        if (state.stage === 0 && b.pusher && b.ballA && b.ballA.position.x < 120) {
+          Body.applyForce(b.pusher, b.pusher.position, { x: 0.0075, y: 0 });
+        }
+
+        checkStages();
+
+        /* Детектор застревания.
+           Важно: ждать можно (шар B стоит на полке, пока домино падают) —
+           застреванием считается только ситуация, когда шар НЕ МОЖЕТ
+           продолжить путь: он неподвижен, при этом впереди нет препятствия
+           и его несёт не вперёд. Поэтому сравниваем не «паузу стадии»,
+           а прогресс: сместился ли шар относительно места, где застрял. */
+        var probe = (state.stage <= 2) ? b.ballA : b.ballB;
+        if (probe) {
+          if (!stuckAt) stuckAt = { x: probe.position.x, y: probe.position.y };
+          var moved = Math.abs(probe.position.x - stuckAt.x) + Math.abs(probe.position.y - stuckAt.y);
+          if (moved > 12) {
+            stuckAt = { x: probe.position.x, y: probe.position.y };
+            stuckFor = 0;
+          } else {
+            stuckFor += step;
+            /* страховка только если шар и правда стоит и этап не «ждёт» */
+            if (stuckFor > 2600 && !stageWaits()) {
+              stuckFor = 0;
+              stuckAt = { x: probe.position.x, y: probe.position.y };
+              rescue();
+            }
+          }
+        }
+      }
+
+      /* конфетти живут своей жизнью (обычная физика) */
+      for (var i = confetti.length - 1; i >= 0; i--) {
+        var c = confetti[i];
+        if (c.position.y > L.H + 80) { Composite.remove(world, c); confetti.splice(i, 1); }
+      }
+    }
+
+    /* Этапы, на которых шар закономерно ЖДЁТ удара (домино, маятник):
+       там отсутствие движения — норма, а не застревание. */
+    function stageWaits() {
+      return state.stage === 3 || state.stage === 4 || state.stage === 8;
+    }
+    /* ------------------------------------------------------------------
+       Столкновения: молототок → колокол → хомяк.
+       Эти два звена нельзя надёжно отследить по координатам, поэтому
+       они отслеживаются по факту удара.
+    ------------------------------------------------------------------ */
+    Events.on(engine, 'collisionStart', function (ev) {
+      if (state.phase !== 'running') return;
+      var pairs = ev.pairs;
+      for (var i = 0; i < pairs.length; i++) {
+        var a = pairs[i].bodyA, bb = pairs[i].bodyB;
+        var la = a.label || '', lb = bb.label || '';
+
+        /* шар ударил купол колокола — звон.
+           Проверяем стадию, чтобы случайное касание не перепрыгнуло
+           вперёд всю цепочку. */
+        if ((la === 'bell' && lb === 'ballB') || (lb === 'bell' && la === 'ballB')) {
+          if (state.stage === 8) { ringBell(); advance(9); lastProgress = state.time; }
+        }
+        /* купол (или шар) дотронулся до спящего хомяка — он просыпается */
+        if ((la === 'hamster' && (lb === 'bell' || lb === 'ballB')) ||
+            (lb === 'hamster' && (la === 'bell' || la === 'ballB'))) {
+          if (state.stage >= 9) { ringBell(); wakeHamster(); }
+        }
+      }
+    });
+
+    build();
+
+    return {
+      engine: engine,
+      world: world,
+      state: state,
+      LAYOUT: L,
+      STAGES: STAGES,
+      getBodies: function () { return b; },
+      getConfetti: function () { return confetti; },
+      on: on,
+      start: start,
+      reset: reset,
+      update: update
+    };
+  }
+
+  var API = { createMachine: createMachine, LAYOUT: LAYOUT, STAGES: STAGES };
+  if (typeof module !== 'undefined' && module.exports) module.exports = API;
+  else global.MachineCore = API;
+})(typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : this));
+</script>
+
+<!-- ===== ВИЗУАЛЬНЫЙ СЛОЙ ===== -->
+<script>
+/* ===== uiparts/01-scene.js ===== */
+/* ============================================================================
+   ВИЗУАЛЬНЫЙ СЛОЙ: рисуем сцену на canvas.
+   Физика (Matter.js) даёт нам координаты тел; всё остальное — декорации
+   музейного экспоната: подписи, рамы, хомяк, «Zzz», лучи света.
+   ========================================================================== */
+(function (global) {
+  'use strict';
+
+  var C = {
+    bgTop: '#1b2440', bgBot: '#0d1220', floor: '#2a3550',
+    wood: '#8b5e3c', woodDark: '#6b4526', woodLight: '#a9713f',
+    metal: '#9aa7bd', metalDark: '#5a6478',
+    ink: '#f4f6fb', dim: '#9fb0cc', accent: '#ffd166',
+    hamster: '#f0a868', hamsterDark: '#d18a4e', bed: '#5b7fb5'
+  };
+
+  function Scene(canvas, machine) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.machine = machine;
+    this.t = 0;
+    this.shake = 0;
+    this.flash = 0;
+    this.L = machine.LAYOUT;
+    this.SCALE = 1;
+    this.resize();
+  }
+
+  Scene.prototype.resize = function () {
+    var c = this.canvas;
+    var dpr = Math.min(global.devicePixelRatio || 1, 2);
+    var w = global.innerWidth, h = global.innerHeight;
+    c.width = Math.floor(w * dpr);
+    c.height = Math.floor(h * dpr);
+    c.style.width = w + 'px';
+    c.style.height = h + 'px';
+    this.dpr = dpr;
+    /* масштабируем логические 1440x810 так, чтобы сцена целиком влезла */
+    var s = Math.min(w / this.L.W, h / this.L.H);
+    this.SCALE = s * dpr;
+    this.offX = (w * dpr - this.L.W * this.SCALE) / 2;
+    this.offY = (h * dpr - this.L.H * this.SCALE) / 2;
+  };
+
+  /* очистка кадра */
+  Scene.prototype.clear = function () {
+    var ctx = this.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+  };
+
+  /* ---------- фон музея ---------- */
+  Scene.prototype.drawBackground = function () {
+    var ctx = this.ctx, S = this.SCALE;
+    var w = this.canvas.width, h = this.canvas.height;
+    var g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, C.bgTop);
+    g.addColorStop(1, C.bgBot);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, w, h);
+
+    /* стена с точечным узором */
+    ctx.save();
+    ctx.globalAlpha = 0.10;
+    ctx.fillStyle = '#8fb0ff';
+    for (var x = 0; x < w; x += 46 * S) {
+      for (var y = 0; y < h; y += 46 * S) {
+        ctx.beginPath();
+        ctx.arc(x, y, 2.2 * S, 0, 6.2832);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+
+    /* пол музея */
+    var fy = this.offY + this.L.floorY * S;
+    var fg = ctx.createLinearGradient(0, fy, 0, h);
+    fg.addColorStop(0, C.floor);
+    fg.addColorStop(1, '#151b2c');
+    ctx.fillStyle = fg;
+    ctx.fillRect(0, fy, w, h - fy);
+    ctx.strokeStyle = 'rgba(255,255,255,.10)';
+    ctx.lineWidth = 2 * S;
+    ctx.beginPath(); ctx.moveTo(0, fy); ctx.lineTo(w, fy); ctx.stroke();
+  };
+
+  /* ---------- табличка экспоната (правый верхний угол) ---------- */
+  Scene.prototype.drawPlaque = function () {
+    var ctx = this.ctx, S = this.SCALE;
+    var w = 420 * S, h = 74 * S;
+    var x = this.L.W * S - w - 24 * S, y = 24 * S;
+    ctx.save();
+    ctx.translate(this.offX, this.offY);
+    ctx.fillStyle = 'rgba(12,18,32,.72)';
+    ctx.strokeStyle = 'rgba(255,209,102,.55)';
+    ctx.lineWidth = 2 * S;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 10 * S);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = C.accent;
+    ctx.font = '700 ' + (17 * S) + 'px Georgia, serif';
+    ctx.fillText('ЭКСПОНАТ №7', x + 16 * S, y + 27 * S);
+    ctx.fillStyle = C.ink;
+    ctx.font = '700 ' + (14 * S) + 'px Georgia, serif';
+    ctx.fillText('«БУДИЛЬНИК ДЛЯ ХОМЯКА»', x + 16 * S, y + 49 * S);
+    ctx.fillStyle = C.dim;
+    ctx.font = (12 * S) + 'px Georgia, serif';
+    ctx.fillText('Машина Голдберга · 11 ступеней', x + 16 * S, y + 66 * S);
+    ctx.restore();
+  };
+
+/* ===== uiparts/02-decor.js ===== */
+
+  /* ---------- декорации ---------- */
+  Scene.prototype.drawDecor = function () {
+    var ctx = this.ctx, L = this.L, S = this.SCALE;
+    ctx.save();
+    ctx.translate(this.offX, this.offY);
+    ctx.lineCap = 'round';
+
+    /* деревянные опоры под этажами */
+    var posts = [[210, 96], [352, 158], [604, 160], [860, 322], [960, 352], [1252, 300]];
+    for (var i = 0; i < posts.length; i++) {
+      var p = posts[i];
+      ctx.strokeStyle = C.woodDark;
+      ctx.lineWidth = 7 * S;
+      ctx.beginPath();
+      ctx.moveTo(p[0] * S, p[1] * S);
+      ctx.lineTo(p[0] * S, L.floorY * S);
+      ctx.stroke();
+    }
+
+    /* подвесы маятников */
+    var pivots = [[L.swing.fulcrum, L.swing.top], [L.bell.px, L.bell.py]];
+    ctx.strokeStyle = C.metalDark;
+    ctx.lineWidth = 3 * S;
+    for (var j = 0; j < pivots.length; j++) {
+      ctx.beginPath();
+      ctx.moveTo(pivots[j][0] * S, pivots[j][1] * S);
+      ctx.lineTo(pivots[j][0] * S, (pivots[j][1] - 14) * S);
+      ctx.stroke();
+      ctx.fillStyle = C.metal;
+      ctx.beginPath();
+      ctx.arc(pivots[j][0] * S, (pivots[j][1] - 14) * S, 6 * S, 0, 6.2832);
+      ctx.fill();
+    }
+
+    /* кровать хомяка */
+    ctx.fillStyle = C.bed;
+    var bw = L.bed.w * S, bh = L.bed.h * S;
+    ctx.fillRect((L.bed.cx - L.bed.w / 2) * S, (L.bed.y - L.bed.h / 2) * S, bw, bh);
+    ctx.fillStyle = 'rgba(255,255,255,.16)';
+    ctx.fillRect((L.bed.cx - L.bed.w / 2) * S, (L.bed.y - L.bed.h / 2) * S, bw, 3 * S);
+
+    ctx.restore();
+  };
+
+  /* ---------- хомяк ---------- */
+  Scene.prototype.drawHamster = function () {
+    var b = this.machine.getBodies();
+    if (!b.hamster) return;
+    var ctx = this.ctx, S = this.SCALE, L = this.L;
+    var p = b.hamster.position, r = L.hamster.r;
+    ctx.save();
+    ctx.translate(this.offX + p.x * S, this.offY + p.y * S);
+    ctx.rotate(b.hamster.angle);
+
+    var asleep = !this.machine.state.awake;
+    ctx.fillStyle = C.hamster;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r * S, r * 0.88 * S, 0, 0, 6.2832);
+    ctx.fill();
+    ctx.fillStyle = C.hamsterDark;
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.28 * S, r * 0.42 * S, r * 0.62 * S, r * 0.42 * S, 0, 0, 6.2832);
+    ctx.fill();
+
+    /* ушки */
+    ctx.fillStyle = C.hamsterDark;
+    ctx.beginPath(); ctx.arc(-r * 0.62 * S, -r * 0.52 * S, r * 0.28 * S, 0, 6.2832); ctx.fill();
+    ctx.beginPath(); ctx.arc(r * 0.55 * S, -r * 0.5 * S, r * 0.26 * S, 0, 6.2832); ctx.fill();
+
+    /* мордочка */
+    ctx.fillStyle = '#fdf1e0';
+    ctx.beginPath(); ctx.ellipse(r * 0.42 * S, r * 0.12 * S, r * 0.44 * S, r * 0.36 * S, 0, 0, 6.2832); ctx.fill();
+
+    /* нос и усы */
+    ctx.fillStyle = '#e07a7a';
+    ctx.beginPath(); ctx.ellipse(r * 0.68 * S, r * 0.02 * S, r * 0.11 * S, r * 0.09 * S, 0, 0, 6.2832); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.55)';
+    ctx.lineWidth = 1.2 * S;
+    for (var w = 0; w < 3; w++) {
+      var wy = (r * 0.05 + (w - 1) * r * 0.13) * S;
+      ctx.beginPath();
+      ctx.moveTo(r * 0.76 * S, wy);
+      ctx.lineTo(r * 1.42 * S, wy - 5 * S);
+      ctx.stroke();
+    }
+
+    /* глаза: спит — закрытые, проснулся — открытые */
+    ctx.fillStyle = '#241a12';
+    if (asleep) {
+      ctx.strokeStyle = '#241a12';
+      ctx.lineWidth = 2.4 * S;
+      ctx.beginPath(); ctx.arc(r * 0.24 * S, -r * 0.2 * S, r * 0.12 * S, 0.35, 2.79); ctx.stroke();
+      ctx.beginPath(); ctx.arc(r * 0.52 * S, -r * 0.2 * S, r * 0.12 * S, 0.35, 2.79); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.arc(r * 0.24 * S, -r * 0.2 * S, r * 0.11 * S, 0, 6.2832); ctx.fill();
+      ctx.beginPath(); ctx.arc(r * 0.52 * S, -r * 0.2 * S, r * 0.11 * S, 0, 6.2832); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(r * 0.21 * S, -r * 0.24 * S, r * 0.04 * S, 0, 6.2832); ctx.fill();
+      ctx.beginPath(); ctx.arc(r * 0.49 * S, -r * 0.24 * S, r * 0.04 * S, 0, 6.2832); ctx.fill();
+    }
+    ctx.restore();
+
+    /* «Zzz» над спящим хомяком */
+    if (asleep) {
+      ctx.save();
+      ctx.translate(this.offX + p.x * S, this.offY + (p.y - r) * S);
+      for (var z = 0; z < 3; z++) {
+        var ph = this.t * 1.1 - z * 0.55;
+        var zo = (Math.sin(ph) * 0.5 + 0.5) * 8 * S;
+        ctx.globalAlpha = 0.30 + 0.55 * (1 - z / 3);
+        ctx.fillStyle = C.ink;
+        ctx.font = '700 ' + ((11 + z * 4) * S) + 'px Georgia, serif';
+        ctx.fillText('Z', zo + z * 13 * S, -zo);
+      }
+      ctx.restore();
+    }
+  };
+
+/* ===== uiparts/03-bodies.js ===== */
+
+  /* ---------- тела Matter.js ---------- */
+  Scene.prototype.drawBodies = function () {
+    var ctx = this.ctx, S = this.SCALE;
+    var bodies = this.machine.engine.world.bodies;
+    ctx.save();
+    ctx.translate(this.offX, this.offY);
+    for (var i = 0; i < bodies.length; i++) {
+      var b = bodies[i];
+      if (b.label === 'hamster') continue;          /* хомяка рисуем отдельно */
+      if (b.isStatic) this.drawStatic(b, b.label || '');
+      else this.drawDynamic(b, b.label || '');
+    }
+    ctx.restore();
+  };
+
+  Scene.prototype.drawStatic = function (b, label) {
+    var ctx = this.ctx, S = this.SCALE;
+    var v = b.vertices;
+    ctx.beginPath();
+    ctx.moveTo(v[0].x * S, v[0].y * S);
+    for (var i = 1; i < v.length; i++) ctx.lineTo(v[i].x * S, v[i].y * S);
+    ctx.closePath();
+
+    /* невидимые границы мира */
+    if (label === 'floor' || label === 'wallL' || label === 'wallR') { ctx.fill(); return; }
+
+    /* металлические рельсы и воронка */
+    if (label.indexOf('chute') === 0 || label === 'rampA' || label === 'drop') {
+      ctx.fillStyle = C.metal; ctx.fill();
+      ctx.strokeStyle = C.metalDark; ctx.lineWidth = 1.4 * S; ctx.stroke();
+      return;
+    }
+    if (label.indexOf('funnel') === 0) {
+      ctx.fillStyle = C.metalDark; ctx.fill();
+      ctx.strokeStyle = C.metal; ctx.lineWidth = 1.6 * S; ctx.stroke();
+      return;
+    }
+    /* толкатель и фиксатор */
+    if (label === 'pusher' || label === 'latch') { ctx.fillStyle = C.accent; ctx.fill(); return; }
+    /* качели */
+    if (label === 'swing') {
+      ctx.fillStyle = C.woodLight; ctx.fill();
+      ctx.strokeStyle = C.woodDark; ctx.lineWidth = 1.4 * S; ctx.stroke();
+      return;
+    }
+    /* кровать */
+    if (label === 'bed' || label === 'bedPost') { ctx.fillStyle = C.bed; ctx.fill(); return; }
+    /* кронштейны */
+    if (label === 'bobPivot' || label === 'bellPivot' || label === 'swingPivot' || label === 'ropeAnchor') {
+      ctx.fillStyle = C.metalDark; ctx.fill(); return;
+    }
+    /* полки, столы, подставки под домино — дерево */
+    ctx.fillStyle = C.wood; ctx.fill();
+    ctx.strokeStyle = C.woodDark; ctx.lineWidth = 1.2 * S; ctx.stroke();
+  };
+
+  Scene.prototype.drawDynamic = function (b, label) {
+    var ctx = this.ctx, S = this.SCALE;
+    var x = b.position.x * S, y = b.position.y * S;
+
+    /* шары */
+    if (label === 'ballA' || label === 'ballB') {
+      var r = b.circleRadius * S;
+      var g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.15, x, y, r);
+      if (label === 'ballA') { g.addColorStop(0, '#ff8a80'); g.addColorStop(1, '#c62828'); }
+      else { g.addColorStop(0, '#82d8ff'); g.addColorStop(1, '#1565c0'); }
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,.35)';
+      ctx.lineWidth = 1.5 * S;
+      ctx.stroke();
+      return;
+    }
+    /* домино */
+    if (label.indexOf('domino') === 0) {
+      var dv = b.vertices;
+      ctx.beginPath();
+      ctx.moveTo(dv[0].x * S, dv[0].y * S);
+      for (var d = 1; d < dv.length; d++) ctx.lineTo(dv[d].x * S, dv[d].y * S);
+      ctx.closePath();
+      ctx.fillStyle = '#f2e6d0'; ctx.fill();
+      ctx.strokeStyle = '#b9a887'; ctx.lineWidth = 1.2 * S; ctx.stroke();
+      ctx.fillStyle = '#b9a887';
+      ctx.beginPath(); ctx.arc(x, y, 2.4 * S, 0, 6.2832); ctx.fill();
+      return;
+    }
+    /* толкатель */
+    if (label === 'pusher') {
+      var pv = b.vertices;
+      ctx.beginPath();
+      ctx.moveTo(pv[0].x * S, pv[0].y * S);
+      for (var q = 1; q < pv.length; q++) ctx.lineTo(pv[q].x * S, pv[q].y * S);
+      ctx.closePath();
+      ctx.fillStyle = C.accent; ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,.3)'; ctx.lineWidth = 1.2 * S; ctx.stroke();
+      return;
+    }
+    /* качели (динамическое тело) */
+    if (label === 'swing') {
+      var swv = b.vertices;
+      ctx.beginPath();
+      ctx.moveTo(swv[0].x * S, swv[0].y * S);
+      for (var sw = 1; sw < swv.length; sw++) ctx.lineTo(swv[sw].x * S, swv[sw].y * S);
+      ctx.closePath();
+      ctx.fillStyle = C.woodLight; ctx.fill();
+      ctx.strokeStyle = C.woodDark; ctx.lineWidth = 1.4 * S; ctx.stroke();
+      return;
+    }
+    /* колокол */
+    if (label === 'bell') { this.drawBell(b); return; }
+    /* конфетти */
+    var cv = b.vertices;
+    ctx.beginPath();
+    ctx.moveTo(cv[0].x * S, cv[0].y * S);
+    for (var k = 1; k < cv.length; k++) ctx.lineTo(cv[k].x * S, cv[k].y * S);
+    ctx.closePath();
+    ctx.fillStyle = (b.render && b.render.fillStyle) ? b.render.fillStyle : '#ffd166';
+    ctx.fill();
+  };
+
+  /* ---------- колокол ---------- */
+  Scene.prototype.drawBell = function (b) {
+    var ctx = this.ctx, S = this.SCALE, L = this.L;
+    var x = b.position.x * S, y = b.position.y * S, r = L.bell.r * S;
+    var a = Math.atan2(b.position.x - L.bell.px, b.position.y - L.bell.py);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(-a);
+    ctx.strokeStyle = C.metalDark;
+    ctx.lineWidth = 3 * S;
+    ctx.beginPath(); ctx.moveTo(0, -r * 1.1); ctx.lineTo(0, 0); ctx.stroke();
+    var g = ctx.createLinearGradient(-r, -r, r, r);
+    g.addColorStop(0, '#ffe9a8'); g.addColorStop(0.5, '#e0b355'); g.addColorStop(1, '#a87a25');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(-r, r * 0.85);
+    ctx.quadraticCurveTo(-r * 0.92, -r * 0.85, 0, -r);
+    ctx.quadraticCurveTo(r * 0.92, -r * 0.85, r, r * 0.85);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#7c5a17'; ctx.lineWidth = 1.6 * S; ctx.stroke();
+    ctx.fillStyle = '#7c5a17';
+    ctx.beginPath(); ctx.arc(0, r * 0.7, r * 0.2, 0, 6.2832); ctx.fill();
+    ctx.restore();
+  };
+
+/* ===== uiparts/04-panel.js ===== */
+
+  /* ---------- панель ступеней (левая нижняя часть) ---------- */
+  Scene.prototype.drawStagePanel = function () {
+    var ctx = this.ctx, S = this.SCALE;
+    var st = this.machine.state;
+    var stages = this.machine.STAGES || [];
+    var w = 400 * S;
+    var x = 24 * S;
+    var h = (stages.length * 21 + 38) * S;
+    var y = this.L.H * S - h - 24 * S;
+    ctx.save();
+    ctx.translate(this.offX, this.offY);
+    ctx.fillStyle = 'rgba(10,15,28,.80)';
+    ctx.strokeStyle = 'rgba(255,255,255,.13)';
+    ctx.lineWidth = 1.2 * S;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 10 * S);
+    ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle = C.accent;
+    ctx.font = '700 ' + (11.5 * S) + 'px Georgia, serif';
+    ctx.fillText('СТУПЕНИ МАШИНЫ', x + 14 * S, y + 23 * S);
+
+    for (var i = 0; i < stages.length; i++) {
+      var done = i < st.stage;
+      var cur = i === st.stage;
+      var yy = y + 41 * S + i * 21 * S;
+      ctx.beginPath();
+      ctx.arc(x + 20 * S, yy - 4 * S, 5.2 * S, 0, 6.2832);
+      if (done) { ctx.fillStyle = '#4cd964'; ctx.fill(); }
+      else if (cur) {
+        ctx.fillStyle = C.accent; ctx.fill();
+        ctx.strokeStyle = 'rgba(255,209,102,.45)'; ctx.lineWidth = 2 * S;
+        ctx.beginPath(); ctx.arc(x + 20 * S, yy - 4 * S, 9.5 * S, 0, 6.2832); ctx.stroke();
+      } else {
+        ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 1.4 * S; ctx.stroke();
+      }
+      ctx.fillStyle = cur ? C.ink : (done ? 'rgba(244,246,251,.62)' : 'rgba(159,176,204,.40)');
+      ctx.font = (cur ? '700 ' : '') + (11 * S) + 'px Georgia, serif';
+      ctx.fillText(stages[i].n, x + 34 * S, yy);
+    }
+    ctx.restore();
+  };
+
+  /* ---------- панель статуса (правая нижняя часть) ---------- */
+  Scene.prototype.drawStatus = function () {
+    var ctx = this.ctx, S = this.SCALE;
+    var st = this.machine.state;
+    var stages = this.machine.STAGES || [];
+    var cur = stages[Math.min(st.stage, stages.length - 1)];
+    var w = 400 * S, h = 66 * S;
+    var x = this.L.W * S - w - 24 * S;
+    var y = this.L.H * S - h - 24 * S;
+    ctx.save();
+    ctx.translate(this.offX, this.offY);
+    ctx.fillStyle = 'rgba(10,15,28,.80)';
+    ctx.strokeStyle = st.phase === 'done' ? 'rgba(76,217,100,.6)' : 'rgba(255,209,102,.4)';
+    ctx.lineWidth = 1.6 * S;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 10 * S);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = C.dim;
+    ctx.font = (11 * S) + 'px Georgia, serif';
+    ctx.fillText(st.phase === 'done' ? 'МАШИНА СРАБОТАЛА · ПРОБЕЛ — запуск · R — сброс'
+                                   : 'СТУПЕНЬ ' + (st.stage + 1) + ' / ' + stages.length,
+                 x + 16 * S, y + 21 * S);
+    ctx.fillStyle = st.phase === 'done' ? '#4cd964' : C.ink;
+    ctx.font = '700 ' + (16 * S) + 'px Georgia, serif';
+    ctx.fillText(cur ? cur.n : '', x + 16 * S, y + 45 * S);
+    ctx.restore();
+  };
+
+  /* ---------- празднование ---------- */
+  Scene.prototype.drawCelebration = function () {
+    if (!this.machine.state.awake) return;
+    var ctx = this.ctx, S = this.SCALE;
+    ctx.save();
+    ctx.translate(this.offX + this.L.W * S / 2, this.offY + 100 * S);
+    var pulse = 1 + Math.sin(this.t * 3) * 0.03;
+    ctx.scale(pulse, pulse);
+    ctx.textAlign = 'center';
+    ctx.font = '700 ' + (44 * S) + 'px Georgia, serif';
+    ctx.fillStyle = 'rgba(255,209,102,.95)';
+    ctx.fillText('ХОМЯК ПРОСНУЛСЯ!', 0, 0);
+    ctx.font = (17 * S) + 'px Georgia, serif';
+    ctx.fillStyle = 'rgba(244,246,251,.85)';
+    ctx.fillText('…и очень недоволен, что его разбудили', 0, 30 * S);
+    ctx.textAlign = 'left';
+    ctx.restore();
+  };
+
+  /* ---------- вспышка при звоне ---------- */
+  Scene.prototype.drawFlash = function () {
+    if (this.flash <= 0) return;
+    var ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = this.flash;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.restore();
+  };
+
+  /* ---------- главный кадр ---------- */
+  Scene.prototype.render = function (dt) {
+    this.t += dt;
+    if (this.flash > 0) this.flash = Math.max(0, this.flash - dt * 3.2);
+    this.clear();
+    this.drawBackground();
+    this.drawDecor();
+    this.drawBodies();
+    this.drawHamster();
+    this.drawPlaque();
+    this.drawStagePanel();
+    this.drawStatus();
+    this.drawCelebration();
+    this.drawFlash();
+  };
+
+  global.Scene = Scene;
+  global.MuseumColors = C;
+})(typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : this));
+</script>
+
+<!-- ===== ЗВУК ===== -->
+<script>
+/* ============================================================================
+   ЗВУК: колокол и прочие эффекты синтезируются через WebAudio.
+   Никаких внешних файлов — всё генерируется.
+   ========================================================================== */
+(function (global) {
+  'use strict';
+
+  var ctx = null;
+
+  function audio() {
+    if (!ctx) {
+      var AC = global.AudioContext || global.webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+    }
+    if (ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+
+  /* Звон колокола: несколько негармоничных partial + затухание. */
+  function bell() {
+    var a = audio();
+    if (!a) return;
+    var now = a.currentTime;
+    var master = a.createGain();
+    master.gain.value = 0.0001;
+    master.connect(a.destination);
+
+    var partials = [
+      { f: 1046.5, g: 0.55, d: 2.4 },   /* основной тон */
+      { f: 1567.98, g: 0.30, d: 1.9 },  /* квинта */
+      { f: 2093.0, g: 0.20, d: 1.5 },   /* октава */
+      { f: 2637.0, g: 0.12, d: 1.1 },
+      { f: 3135.96, g: 0.07, d: 0.8 }
+    ];
+    partials.forEach(function (p) {
+      var o = a.createOscillator();
+      var g = a.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(p.f, now);
+      o.frequency.exponentialRampToValueAtTime(p.f * 0.995, now + p.d);
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(p.g, now + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + p.d);
+      o.connect(g); g.connect(master);
+      o.start(now); o.stop(now + p.d + 0.05);
+    });
+    master.gain.exponentialRampToValueAtTime(0.55, now + 0.01);
+    master.gain.exponentialRampToValueAtTime(0.0001, now + 2.6);
+  }
+
+  /* Короткий «тик» для домино. */
+  function tick() {
+    var a = audio();
+    if (!a) return;
+    var now = a.currentTime;
+    var o = a.createOscillator();
+    var g = a.createGain();
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(880 + Math.random() * 260, now);
+    g.gain.setValueAtTime(0.09, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.07);
+    o.connect(g); g.connect(a.destination);
+    o.start(now); o.stop(now + 0.09);
+  }
+
+  /* Финальный аккорд — «праздник». */
+  function fanfare() {
+    var a = audio();
+    if (!a) return;
+    var now = a.currentTime;
+    [523.25, 659.25, 783.99, 1046.5].forEach(function (f, i) {
+      var o = a.createOscillator();
+      var g = a.createGain();
+      o.type = 'triangle';
+      o.frequency.value = f;
+      var st = now + i * 0.10;
+      g.gain.setValueAtTime(0.0001, st);
+      g.gain.exponentialRampToValueAtTime(0.20, st + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, st + 0.9);
+      o.connect(g); g.connect(a.destination);
+      o.start(st); o.stop(st + 1.0);
+    });
+  }
+
+  global.Sound = { bell: bell, tick: tick, fanfare: fanfare, unlock: audio };
+})(typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : this));
+</script>
+<!-- ===== ТОЧКИ ВХОДА ===== -->
+<script>
+/* ============================================================================
+   ТОЧКИ ВХОДА: кнопки START / RESET, игровой цикл, связь физики и звука.
+   ========================================================================== */
+(function (global) {
+  'use strict';
+
+  var canvas = document.getElementById('stage');
+  var btnStart = document.getElementById('start');
+  var btnReset = document.getElementById('reset');
+  var statusEl = document.getElementById('status');
+
+  var machine = global.MachineCore.createMachine(global.Matter);
+  var scene = new global.Scene(canvas, machine);
+  var last = performance.now();
+  var acc = 0;
+  var STEP = 1000 / 60;
+
+  /* ---------------- события машины ---------------- */
+  machine.on(function (type, data) {
+    if (type === 'stage') {
+      if (data.stage > 0 && data.stage < 10) global.Sound.tick();
+    } else if (type === 'bell') {
+      global.Sound.bell();
+      scene.flash = 0.55;
+    } else if (type === 'wake') {
+      global.Sound.fanfare();
+      scene.flash = 0.35;
+    } else if (type === 'start') {
+      statusEl.textContent = 'Машина запущена';
+    } else if (type === 'reset') {
+      statusEl.textContent = 'Готов к запуску';
+    }
+  });
+
+  /* ---------------- кнопки ---------------- */
+  btnStart.addEventListener('click', function () {
+    global.Sound.unlock();
+    if (machine.state.phase === 'running') return;
+    machine.start();
+  });
+
+  btnReset.addEventListener('click', function () {
+    machine.reset();
+  });
+
+  global.addEventListener('keydown', function (e) {
+    if (e.code === 'Space') { e.preventDefault(); global.Sound.unlock(); machine.start(); }
+    if (e.code === 'KeyR') machine.reset();
+  });
+
+  global.addEventListener('resize', function () { scene.resize(); });
+
+  /* ---------------- игровой цикл ----------------
+     Физика идёт фиксированным шагом (детерминизм), рендер — каждый кадр. */
+  function frame(now) {
+    var dt = Math.min(now - last, 100);
+    last = now;
+
+    acc += dt;
+    var guard = 0;
+    while (acc >= STEP && guard < 6) {
+      machine.update(STEP);
+      acc -= STEP;
+      guard++;
+    }
+    if (guard >= 6) acc = 0;
+
+    scene.render(dt / 1000);
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})(typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : this));
+</script>
+
+</body>
+</html>

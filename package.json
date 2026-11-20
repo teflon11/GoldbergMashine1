@@ -1,0 +1,26 @@
+{
+  "name": "goldberg-mashine-1",
+  "version": "1.0.0",
+  "description": "Экспонат №7 «Будильник для хомяка» — машина Голдберга на Matter.js",
+  "license": "MIT",
+  "keywords": [
+    "matter-js",
+    "rube-goldberg",
+    "physics",
+    "canvas",
+    "game"
+  ],
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node tools/build.mjs && node tools/test.mjs 5",
+    "test:browser": "node tools/build.mjs && node tools/browser-check.mjs",
+    "audit": "node tools/audit-secrets.mjs .",
+    "trace": "node tools/trace.mjs",
+    "sweep": "node tools/sweep.mjs",
+    "lab": "node tools/domino-lab2.mjs"
+  },
+  "devDependencies": {
+    "matter-js": "0.20.0",
+    "puppeteer-core": "^24.0.0"
+  }
+}
