@@ -46,8 +46,24 @@ fs.writeFileSync(out, html, 'utf8');
    незакрытых тегов или пустых <script> блоков. */
 const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 const empty = scripts.filter(s => !s[1].trim()).length;
-const external = [...new Set([...html.matchAll(/https?:\/\/[^\s"')]+/g)].map(m => m[0]))];
-const bad = external.filter(u => !u.includes('matter-js'));
+
+/* Внешние ресурсы. Ищем только настоящие сетевые обращения:
+   - ссылки в атрибутах src/href (кроме data: и #)
+   - URL в CSS url()
+   Регулярка по всему HTML давала бы ложные срабатывания: namespace SVG
+   внутри инлайновой data:-иконки — это не запрос в сеть. */
+const external = new Set();
+for (const m of html.matchAll(/\b(?:src|href)\s*=\s*["']([^"']+)["']/gi)) {
+  const u = m[1].trim();
+  if (!u || u.startsWith('data:') || u.startsWith('#')) continue;
+  if (/^https?:/i.test(u)) external.add(u);
+}
+for (const m of html.matchAll(/url\(\s*['"]?([^'")]+)['"]?\s*\)/gi)) {
+  const u = m[1].trim();
+  if (!u || u.startsWith('data:') || u.startsWith('#')) continue;
+  if (/^https?:/i.test(u)) external.add(u);
+}
+const bad = [...external].filter(u => !u.includes('matter-js'));
 
 if (empty || bad.length || !html.includes('matter.min.js')) {
   console.error('ОШИБКА сборки: пустых <script> =', empty, ', посторонние ресурсы =', bad);
@@ -56,5 +72,5 @@ if (empty || bad.length || !html.includes('matter.min.js')) {
 console.log(
   `index.html собран: ${(html.length / 1024).toFixed(1)} КБ, ` +
   `блоков <script>: ${scripts.length + 1} (1 внешний + ${scripts.length} встроенных), ` +
-  `внешние ресурсы: ${external.join(', ')}`
+  `внешние ресурсы: ${[...external].join(', ')}`
 );

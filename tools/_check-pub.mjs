@@ -1,0 +1,22 @@
+import puppeteer from 'puppeteer-core';
+import fs from 'node:fs';
+const cands = ['C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe','C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe','C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'];
+const exe = cands.find(c => fs.existsSync(c));
+const browser = await puppeteer.launch({ executablePath: exe, headless: 'new' });
+const page = await browser.newPage();
+await page.setViewport({ width: 1400, height: 800 });
+const failed = [];
+page.on('response', r => { if (r.status() >= 400) failed.push(r.status() + ' ' + r.url()); });
+await page.goto('https://teflon11.github.io/GoldbergMashine1/', { waitUntil: 'networkidle2', timeout: 60000 });
+await new Promise(r => setTimeout(r, 1500));
+await page.evaluate(() => { const b=[...document.querySelectorAll('button')].find(x=>/start/i.test(x.textContent)); if(b) b.click(); });
+await new Promise(r => setTimeout(r, 17000));
+const out = await page.evaluate(() => {
+  const s = document.querySelector('#status');
+  return { status: s ? s.textContent : null };
+});
+fs.writeFileSync('tools/_pub.json', JSON.stringify({ failed, out }, null, 2));
+console.log('HTTP-ошибки:', JSON.stringify(failed));
+console.log('финальный статус:', JSON.stringify(out.status));
+await page.screenshot({ path: 'shots/pub-final.png' });
+await browser.close();
